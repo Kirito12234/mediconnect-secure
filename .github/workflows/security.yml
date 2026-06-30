@@ -1,0 +1,81 @@
+name: Security CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-audit:
+    name: Backend npm audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mediconnect-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install
+      # Report vulnerabilities but do not hard-fail the pipeline.
+      # Remove continue-on-error to enforce a clean audit as a gate.
+      - name: Run npm audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+  frontend-audit:
+    name: Frontend npm audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mediconnect-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install
+      - name: Run npm audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+  build-images:
+    name: Build Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t mediconnect-backend:ci ./mediconnect-backend
+      - name: Build frontend image
+        run: docker build -t mediconnect-frontend:ci ./mediconnect-frontend
+
+  health-check:
+    name: Run containers and verify health endpoint
+    runs-on: ubuntu-latest
+    needs: [build-images]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack
+        run: docker compose up -d --build
+      - name: Wait for backend health endpoint
+        run: |
+          echo "Waiting for backend health endpoint..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:5001/health; then
+              echo ""
+              echo "Backend is healthy"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "Backend did not become healthy in time"
+          docker compose logs backend
+          exit 1
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
