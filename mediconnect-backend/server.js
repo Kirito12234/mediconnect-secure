@@ -8,9 +8,24 @@ const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
 const { Server } = require('socket.io');
 
+const cors = require('cors');
+
 const connectDB = require('./config/db');
 const corsMiddleware = require('./config/cors');
-const { COOKIE_NAME } = require('./config/security');
+const passport = require('./config/passport');
+const { COOKIE_NAME, isPentestMode } = require('./config/security');
+
+const PENTEST = isPentestMode();
+
+if (PENTEST) {
+  console.log('');
+  console.log('╔══════════════════════════════════════════════╗');
+  console.log('║  ⚠️  WARNING: PENTEST MODE IS ACTIVE          ║');
+  console.log('║  All security features are DISABLED!          ║');
+  console.log('║  DO NOT use in production!                    ║');
+  console.log('╚══════════════════════════════════════════════╝');
+  console.log('');
+}
 
 const { apiLimiter } = require('./middleware/rateLimiter');
 const {
@@ -58,21 +73,31 @@ const securityHeaders = helmet({
   xssFilter: true,
 });
 
-app.use(securityHeaders);
+// 1. Helmet + custom headers — applied only when NOT in pentest mode
+if (!PENTEST) {
+  app.use(securityHeaders);
 
-// 1b. Additional custom security headers
-app.use((req, res, next) => {
-  res.setHeader(
-    'Permissions-Policy',
-    'camera=(), microphone=(), geolocation=(), payment=()'
-  );
-  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
-  res.setHeader('X-Download-Options', 'noopen');
-  next();
-});
+  // 1b. Additional custom security headers
+  app.use((req, res, next) => {
+    res.setHeader(
+      'Permissions-Policy',
+      'camera=(), microphone=(), geolocation=(), payment=()'
+    );
+    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+    res.setHeader('X-Download-Options', 'noopen');
+    next();
+  });
+} else {
+  console.log('⚠️  PENTEST MODE: Helmet security headers DISABLED');
+}
 
-// 2. CORS with strict origins
-app.use(corsMiddleware);
+// 2. CORS — strict origins normally; accept ALL origins in pentest mode
+if (PENTEST) {
+  app.use(cors({ origin: true, credentials: true }));
+  console.log('⚠️  PENTEST MODE: CORS accepting ALL origins');
+} else {
+  app.use(corsMiddleware);
+}
 
 // Handle CORS rejection gracefully
 app.use((err, req, res, next) => {
@@ -88,6 +113,9 @@ app.use(cookieParser());
 // 4. Body parsers with size limits
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+
+// 4b. Passport (stateless — no sessions; used only for Google OAuth strategy)
+app.use(passport.initialize());
 
 // Serve uploaded files statically (no directory listing). Allow cross-origin
 // loading so the frontend (different port) can display avatars.
@@ -154,7 +182,12 @@ const server = http.createServer(app);
 // 8. Socket.IO with CORS restriction
 const io = new Server(server, {
   cors: {
-    origin: ['http://localhost:3000', 'http://localhost:3001'],
+    origin: [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://192.168.56.1:3000',
+      'http://192.168.56.1:3001',
+    ],
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -231,7 +264,7 @@ app.set('emitNotification', emitNotification);
 const start = async () => {
   try {
     await connectDB();
-    server.listen(PORT, () => {
+    server.listen(PORT, '0.0.0.0', () => {
       console.log(`MediConnect backend listening on port ${PORT}`);
     });
   } catch (err) {
