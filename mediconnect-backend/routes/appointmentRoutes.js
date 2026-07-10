@@ -5,7 +5,12 @@ const Appointment = require('../models/Appointment');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { logAccessDenied } = require('../utils/auditLogger');
 const { encrypt, decrypt } = require('../utils/encryption');
-const { appointmentSchema, sanitizeInput } = require('../utils/validationSchemas');
+const {
+  appointmentSchema,
+  sanitizeInput,
+  validateOrBypass,
+} = require('../utils/validationSchemas');
+const { isPentestMode } = require('../config/security');
 const { respondError } = require('../utils/respondError');
 
 const router = express.Router();
@@ -13,26 +18,20 @@ const router = express.Router();
 // All appointment routes require authentication
 router.use(protect);
 
-// Helper: does the current user own (or is assigned to) this appointment?
-const isParticipant = (appointment, user) =>
-  appointment.patient.toString() === user._id.toString() ||
-  appointment.doctor.toString() === user._id.toString();
+// Helper: is the current user the patient who owns this appointment?
+// (doctor is now a free-text name, not a user reference)
+const isOwnerPatient = (appointment, user) =>
+  appointment.patient.toString() === user._id.toString();
 
 // GET /api/appointments - role-scoped listing
 router.get('/', async (req, res) => {
   try {
-    let filter;
-    if (req.user.role === 'doctor') {
-      filter = { doctor: req.user._id };
-    } else if (req.user.role === 'admin') {
-      filter = {};
-    } else {
-      filter = { patient: req.user._id };
-    }
+    // doctor is a free-text field, so only admins see everything;
+    // everyone else sees the appointments they booked as a patient.
+    const filter = req.user.role === 'admin' ? {} : { patient: req.user._id };
 
     const appointments = await Appointment.find(filter)
       .populate('patient', 'name email')
-      .populate('doctor', 'name email')
       .sort({ date: 1 });
 
     // Decrypt notes before returning
@@ -80,37 +79,42 @@ router.get(
   }
 );
 
-// GET /api/appointments/:id - single appointment with ownership (IDOR) check
+// GET /api/appointments/:id - single appointment.
+// IDOR ownership is enforced UNLESS PENTEST_MODE=true (deliberate, for
+// demonstrating the vulnerability vs. the fix). Defaults to SECURE.
 router.get('/:id', async (req, res) => {
   try {
-    const appointment = await Appointment.findById(req.params.id)
-      .populate('patient', 'name email')
-      .populate('doctor', 'name email');
+    const appointment = await Appointment.findById(req.params.id).populate(
+      'patient',
+      'name email'
+    );
 
     if (!appointment) {
       return res.status(404).json({ message: 'Appointment not found' });
     }
 
-    const patientId =
-      appointment.patient?._id?.toString() || appointment.patient?.toString();
-    const doctorId =
-      appointment.doctor?._id?.toString() || appointment.doctor?.toString();
-    const isOwner = patientId === req.user._id.toString();
-    const isDoctor = doctorId === req.user._id.toString();
-    const isAdmin = req.user.role === 'admin';
+    const pentestMode = isPentestMode();
 
-    if (!isOwner && !isDoctor && !isAdmin) {
-      await logAccessDenied(
-        req.user._id,
-        req.user.email,
-        req.ip,
-        req.headers['user-agent'],
-        req.originalUrl,
-        'IDOR attempt'
-      );
-      return res
-        .status(403)
-        .json({ message: 'Access denied. You do not own this resource.' });
+    if (!pentestMode) {
+      const patientId =
+        appointment.patient?._id?.toString() ||
+        appointment.patient?.toString();
+      const isOwner = patientId === req.user._id.toString();
+      const isAdmin = req.user.role === 'admin';
+
+      if (!isOwner && !isAdmin) {
+        await logAccessDenied(
+          req.user._id,
+          req.user.email,
+          req.ip,
+          req.headers['user-agent'],
+          req.originalUrl,
+          'IDOR attempt'
+        );
+        return res
+          .status(403)
+          .json({ message: 'Access denied. You do not own this resource.' });
+      }
     }
 
     const result = appointment.toObject();
@@ -122,24 +126,10 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/appointments - patients ('user' role) book appointments
+// POST /api/appointments - book an appointment
 router.post('/', async (req, res) => {
   try {
-    if (req.user.role !== 'user') {
-      logAccessDenied(
-        req.user._id,
-        req.user.email,
-        req.ip,
-        req.headers['user-agent'],
-        req.originalUrl,
-        'create_requires_user_role'
-      );
-      return res
-        .status(403)
-        .json({ message: 'Only patients can create appointments' });
-    }
-
-    const parsed = appointmentSchema.safeParse(req.body);
+    const parsed = validateOrBypass(appointmentSchema, req.body);
     if (!parsed.success) {
       return res.status(400).json({
         message: 'Validation failed',
@@ -149,30 +139,28 @@ router.post('/', async (req, res) => {
 
     const appointment = await Appointment.create({
       patient: req.user._id,
-      doctor: parsed.data.doctor,
+      doctor: parsed.data.doctor || 'Dr. Smith',
       date: parsed.data.date,
       time: parsed.data.time,
+      type: parsed.data.type || 'General Consultation',
       notes: parsed.data.notes
         ? encrypt(sanitizeInput(parsed.data.notes))
-        : parsed.data.notes,
+        : '',
+      status: 'scheduled',
     });
 
     // Return notes in plaintext to the creator
     const result = appointment.toObject();
     if (result.notes) result.notes = decrypt(result.notes);
 
-    // Real-time: notify the assigned doctor of the new booking
+    // Real-time: notify the patient's own room of the new booking
     const emitAppointmentUpdate = req.app.get('emitAppointmentUpdate');
-    const emitNotification = req.app.get('emitNotification');
     if (emitAppointmentUpdate) emitAppointmentUpdate(appointment);
-    if (emitNotification) {
-      emitNotification(parsed.data.doctor, {
-        type: 'appointment',
-        message: 'You have a new appointment request.',
-      });
-    }
 
-    return res.status(201).json({ appointment: result });
+    return res.status(201).json({
+      message: 'Appointment created successfully',
+      appointment: result,
+    });
   } catch (err) {
     return respondError(res, 500, 'Failed to create appointment', err);
   }
@@ -181,7 +169,10 @@ router.post('/', async (req, res) => {
 const updateSchema = z.object({
   date: z.coerce.date().optional(),
   time: z.string().min(1).optional(),
-  status: z.enum(['pending', 'confirmed', 'completed', 'cancelled']).optional(),
+  type: z.string().optional(),
+  status: z
+    .enum(['scheduled', 'pending', 'confirmed', 'completed', 'cancelled'])
+    .optional(),
   notes: z.string().optional(),
 });
 
@@ -193,7 +184,12 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Appointment not found' });
     }
 
-    if (!isParticipant(appointment, req.user) && req.user.role !== 'admin') {
+    // IDOR ownership check — bypassed in PENTEST_MODE
+    if (
+      !isPentestMode() &&
+      !isOwnerPatient(appointment, req.user) &&
+      req.user.role !== 'admin'
+    ) {
       logAccessDenied(
         req.user._id,
         req.user.email,
@@ -207,7 +203,7 @@ router.put('/:id', async (req, res) => {
         .json({ message: 'Access denied. You do not own this resource.' });
     }
 
-    const parsed = updateSchema.safeParse(req.body);
+    const parsed = validateOrBypass(updateSchema, req.body);
     if (!parsed.success) {
       return res.status(400).json({
         message: 'Validation failed',
@@ -243,9 +239,10 @@ router.delete('/:id', async (req, res) => {
     }
 
     // IDOR check: only the owning patient or an admin may delete
+    // (bypassed in PENTEST_MODE)
     const isOwner =
       appointment.patient.toString() === req.user._id.toString();
-    if (!isOwner && req.user.role !== 'admin') {
+    if (!isPentestMode() && !isOwner && req.user.role !== 'admin') {
       await logAccessDenied(
         req.user._id,
         req.user.email,
