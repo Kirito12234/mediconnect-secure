@@ -5,10 +5,11 @@ import { Calendar, Clock } from 'lucide-react';
 export interface Appointment {
   _id: string;
   patient: { name: string; email: string } | string;
-  doctor: { name: string; email: string } | string;
+  doctor: string;
   date: string;
   time: string;
-  status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
+  type?: string;
+  status: 'scheduled' | 'pending' | 'confirmed' | 'completed' | 'cancelled';
   notes?: string;
 }
 
@@ -18,6 +19,7 @@ interface AppointmentCardProps {
 }
 
 const statusColors: Record<Appointment['status'], string> = {
+  scheduled: '#0d9488',
   pending: '#f59e0b',
   confirmed: '#10b981',
   completed: '#6b7280',
@@ -28,10 +30,7 @@ const AppointmentCard: React.FC<AppointmentCardProps> = ({
   appointment,
   onCancel,
 }) => {
-  const doctorName =
-    typeof appointment.doctor === 'string'
-      ? appointment.doctor
-      : appointment.doctor.name;
+  const doctorName = appointment.doctor;
 
   return (
     <motion.div
@@ -46,11 +45,14 @@ const AppointmentCard: React.FC<AppointmentCardProps> = ({
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <strong>Dr. {doctorName}</strong>
+        <strong>{doctorName}</strong>
         <span style={{ color: statusColors[appointment.status] }}>
           {appointment.status}
         </span>
       </div>
+      {appointment.type && (
+        <span style={{ color: '#6b7280', fontSize: 13 }}>{appointment.type}</span>
+      )}
       <div style={{ display: 'flex', gap: 16, color: '#6b7280' }}>
         <span><Calendar size={16} /> {new Date(appointment.date).toLocaleDateString()}</span>
         <span><Clock size={16} /> {appointment.time}</span>
