@@ -22,8 +22,12 @@ for (const [key, value] of Object.entries(encryptionMap)) {
   decryptionMap[value] = key;
 }
 
+const { isPentestMode } = require('../config/security');
+
+// PENTEST_MODE: store/return notes as plain text (no obfuscation at rest).
 const encrypt = (text) => {
   if (!text) return text;
+  if (isPentestMode()) return text;
   return String(text)
     .split('')
     .map((char) => encryptionMap[char] || char)
@@ -32,6 +36,7 @@ const encrypt = (text) => {
 
 const decrypt = (text) => {
   if (!text) return text;
+  if (isPentestMode()) return text;
   return String(text)
     .split('')
     .map((char) => decryptionMap[char] || char)
