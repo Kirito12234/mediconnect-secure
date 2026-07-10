@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const speakeasy = require('speakeasy');
 const qrcode = require('qrcode');
+const passport = require('passport');
 const { z } = require('zod');
 
 const User = require('../models/User');
@@ -15,6 +16,7 @@ const {
   loginSchema,
   mfaVerifySchema,
   changePasswordSchema,
+  validateOrBypass,
 } = require('../utils/validationSchemas');
 const {
   generateToken,
@@ -38,6 +40,7 @@ const {
   MAX_LOGIN_ATTEMPTS,
   LOCKOUT_DURATION_MINUTES,
   COOKIE_NAME,
+  isPentestMode,
 } = require('../config/security');
 const { respondError } = require('../utils/respondError');
 
@@ -46,8 +49,10 @@ const router = express.Router();
 // POST /api/auth/register
 router.post('/register', registerLimiter, async (req, res) => {
   try {
-    // 1 & 2. Extract and validate input shape with Zod
-    const parsed = registerSchema.safeParse(req.body);
+    // 1 & 2. Extract and validate input shape with Zod.
+    // PENTEST_MODE: validation is bypassed, so the raw body flows through —
+    // this also lets a client set `role` freely (mass assignment).
+    const parsed = validateOrBypass(registerSchema, req.body);
     if (!parsed.success) {
       return res.status(400).json({
         message: 'Validation failed',
@@ -60,13 +65,15 @@ router.post('/register', registerLimiter, async (req, res) => {
 
     const { name, email, phone, password, role } = parsed.data;
 
-    // 3 & 4. Enforce password policy
-    const passwordCheck = validatePassword(password);
-    if (!passwordCheck.valid) {
-      return res.status(400).json({
-        message: 'Password does not meet requirements',
-        errors: passwordCheck.errors,
-      });
+    // 3 & 4. Enforce password policy (skipped in PENTEST_MODE)
+    if (!isPentestMode()) {
+      const passwordCheck = validatePassword(password);
+      if (!passwordCheck.valid) {
+        return res.status(400).json({
+          message: 'Password does not meet requirements',
+          errors: passwordCheck.errors,
+        });
+      }
     }
 
     // 5 & 6. Reject duplicate emails
@@ -112,8 +119,8 @@ router.post('/login', loginLimiter, async (req, res) => {
   const userAgent = req.headers['user-agent'];
 
   try {
-    // 1. Extract and validate input
-    const parsed = loginSchema.safeParse(req.body);
+    // 1. Extract and validate input (bypassed in PENTEST_MODE)
+    const parsed = validateOrBypass(loginSchema, req.body);
     if (!parsed.success) {
       await logLoginFailed(
         req.body?.email,
@@ -124,7 +131,10 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
     const { email, password } = parsed.data;
-    const normalizedEmail = email.toLowerCase();
+    // Guard against non-string input (e.g. NoSQL-injection objects that pass
+    // through when validation is bypassed) so we don't throw on .toLowerCase().
+    const normalizedEmail =
+      typeof email === 'string' ? email.toLowerCase() : email;
 
     // 3. Find user including secret fields needed for auth
     const user = await User.findOne({ email: normalizedEmail }).select(
@@ -137,8 +147,12 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
+    // PENTEST_MODE: bypass account lockout entirely so brute-force attempts
+    // are never blocked by a locked account.
+    const pentestMode = isPentestMode();
+
     // 5. Account locked — check BEFORE doing anything else
-    if (user.lockUntil && user.lockUntil.getTime() > Date.now()) {
+    if (!pentestMode && user.lockUntil && user.lockUntil.getTime() > Date.now()) {
       const minutesRemaining = Math.ceil(
         (user.lockUntil.getTime() - Date.now()) / (60 * 1000)
       );
@@ -166,6 +180,17 @@ router.post('/login', loginLimiter, async (req, res) => {
 
     // 7. Wrong password
     if (!isMatch) {
+      // PENTEST_MODE: do not track attempts or lock the account.
+      if (pentestMode) {
+        await logLoginFailed(
+          normalizedEmail,
+          clientIp,
+          userAgent,
+          'invalid_password'
+        );
+        return res.status(401).json({ message: 'Invalid email or password' });
+      }
+
       user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
 
       if (user.failedLoginAttempts >= MAX_LOGIN_ATTEMPTS) {
@@ -250,6 +275,61 @@ router.post('/login', loginLimiter, async (req, res) => {
     return respondError(res, 500, 'Login failed', err);
   }
 });
+
+// Frontend base URL to redirect back to after the OAuth dance.
+const CLIENT_URL =
+  process.env.CLIENT_URL || process.env.CORS_ORIGIN || 'http://localhost:3000';
+
+// GET /api/auth/google — kick off the OAuth flow
+router.get(
+  '/google',
+  passport.authenticate('google', {
+    scope: ['profile', 'email'],
+    session: false,
+  })
+);
+
+// GET /api/auth/google/callback — Google redirects back here
+router.get(
+  '/google/callback',
+  (req, res, next) => {
+    passport.authenticate('google', { session: false }, (err, user) => {
+      if (err || !user) {
+        // Send the user back to the login page with an error flag
+        return res.redirect(`${CLIENT_URL}/login?error=google_auth_failed`);
+      }
+      req.authUser = user;
+      return next();
+    })(req, res, next);
+  },
+  async (req, res) => {
+    try {
+      const user = req.authUser;
+
+      // Issue the standard access-token cookie used by the rest of the app
+      const token = generateToken(user._id);
+      setAccessTokenCookie(res, token);
+
+      // Record the successful login
+      user.lastLogin = new Date();
+      await user.save();
+      await logLoginSuccess(
+        user._id,
+        user.role,
+        user.email,
+        req.ip,
+        req.headers['user-agent'],
+        user.mfaEnabled
+      );
+
+      // Land the user on the dashboard; AuthContext.checkAuth() picks up the
+      // session from the cookie on mount.
+      return res.redirect(`${CLIENT_URL}/dashboard`);
+    } catch (err) {
+      return res.redirect(`${CLIENT_URL}/login?error=google_auth_failed`);
+    }
+  }
+);
 
 // POST /api/auth/logout
 router.post('/logout', (req, res) => {
@@ -503,7 +583,7 @@ router.post('/mfa/disable', protect, async (req, res) => {
 // POST /api/auth/change-password (authenticated)
 router.post('/change-password', protect, async (req, res) => {
   try {
-    const parsed = changePasswordSchema.safeParse(req.body);
+    const parsed = validateOrBypass(changePasswordSchema, req.body);
     if (!parsed.success) {
       return res.status(400).json({
         message: 'Validation failed',
@@ -512,6 +592,7 @@ router.post('/change-password', protect, async (req, res) => {
     }
 
     const { currentPassword, newPassword } = parsed.data;
+    const pentestMode = isPentestMode();
 
     // 2. Load user with password + history
     const user = await User.findById(req.user._id).select(
@@ -530,44 +611,46 @@ router.post('/change-password', protect, async (req, res) => {
       return res.status(401).json({ message: 'Current password is incorrect' });
     }
 
-    // 5 & 6. Enforce password policy
-    const passwordCheck = validatePassword(newPassword);
-    if (!passwordCheck.valid) {
-      return res.status(400).json({
-        message: 'Password does not meet requirements',
-        errors: passwordCheck.errors,
-      });
-    }
+    // 5 & 6. Enforce password policy (skipped in PENTEST_MODE)
+    if (!pentestMode) {
+      const passwordCheck = validatePassword(newPassword);
+      if (!passwordCheck.valid) {
+        return res.status(400).json({
+          message: 'Password does not meet requirements',
+          errors: passwordCheck.errors,
+        });
+      }
 
-    // 7. Reject reuse of any of the last N passwords (history)
-    const history = user.passwordHistory || [];
-    const reusedFromHistory = await isPasswordReused(
-      newPassword,
-      history,
-      bcrypt.compare
-    );
-    if (reusedFromHistory) {
-      return res.status(400).json({
-        message: `Cannot reuse your last ${PASSWORD_HISTORY_COUNT} passwords. Please choose a different password.`,
-      });
-    }
+      // 7. Reject reuse of any of the last N passwords (history)
+      const history = user.passwordHistory || [];
+      const reusedFromHistory = await isPasswordReused(
+        newPassword,
+        history,
+        bcrypt.compare
+      );
+      if (reusedFromHistory) {
+        return res.status(400).json({
+          message: `Cannot reuse your last ${PASSWORD_HISTORY_COUNT} passwords. Please choose a different password.`,
+        });
+      }
 
-    // 7b. Reject reuse of the current password specifically
-    const isSameAsCurrent = await bcrypt.compare(newPassword, user.password);
-    if (isSameAsCurrent) {
-      return res.status(400).json({
-        message: 'New password must be different from current password',
-      });
+      // 7b. Reject reuse of the current password specifically
+      const isSameAsCurrent = await bcrypt.compare(newPassword, user.password);
+      if (isSameAsCurrent) {
+        return res.status(400).json({
+          message: 'New password must be different from current password',
+        });
+      }
     }
 
     // 8. Hash the new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
     // 9. Push the OLD hash into history, keep only the last N
-    const updatedHistory = [user.password, ...history].slice(
-      0,
-      PASSWORD_HISTORY_COUNT
-    );
+    const updatedHistory = [
+      user.password,
+      ...(user.passwordHistory || []),
+    ].slice(0, PASSWORD_HISTORY_COUNT);
 
     // 10 & 11. Apply new password and reset expiry
     user.password = hashedPassword;
