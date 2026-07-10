@@ -4,16 +4,26 @@ const http = require('http');
 const cookie = require('cookie');
 const jwt = require('jsonwebtoken');
 const express = require('express');
-const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
 const { Server } = require('socket.io');
 
-const cors = require('cors');
-
 const connectDB = require('./config/db');
-const corsMiddleware = require('./config/cors');
 const passport = require('./config/passport');
 const { COOKIE_NAME, isPentestMode } = require('./config/security');
+const {
+  ALLOWED_ORIGINS,
+  corsMiddleware,
+  securityHeaders,
+  noSqlSanitize,
+  preventPrototypePollution,
+  errorHandler,
+} = require('./middleware/security');
+const {
+  sanitizeXss,
+  validateInputLength,
+  validateEmail,
+  preventMassAssignment,
+} = require('./middleware/inputValidation');
 
 const PENTEST = isPentestMode();
 
@@ -27,7 +37,7 @@ if (PENTEST) {
   console.log('');
 }
 
-const { apiLimiter } = require('./middleware/rateLimiter');
+const { apiLimiter, loginLimiter } = require('./middleware/rateLimiter');
 const {
   getCsrfToken,
   verifyCsrfToken,
@@ -44,78 +54,34 @@ const PORT = process.env.PORT || 5001;
 // Belt-and-suspenders: hide the framework signature
 app.disable('x-powered-by');
 
-// 1. Helmet with explicit strict settings
-const securityHeaders = helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:', 'blob:'],
-      fontSrc: ["'self'"],
-      connectSrc: ["'self'", 'http://localhost:5001'],
-      frameSrc: ["'none'"],
-      objectSrc: ["'none'"],
-      baseUri: ["'self'"],
-      formAction: ["'self'"],
-    },
-  },
-  crossOriginOpenerPolicy: { policy: 'same-origin' },
-  crossOriginResourcePolicy: { policy: 'same-origin' },
-  dnsPrefetchControl: { allow: false },
-  frameguard: { action: 'deny' },
-  hidePoweredBy: true,
-  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
-  ieNoOpen: true,
-  noSniff: true,
-  originAgentCluster: true,
-  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  xssFilter: true,
-});
-
-// 1. Helmet + custom headers — applied only when NOT in pentest mode
-if (!PENTEST) {
-  app.use(securityHeaders);
-
-  // 1b. Additional custom security headers
-  app.use((req, res, next) => {
-    res.setHeader(
-      'Permissions-Policy',
-      'camera=(), microphone=(), geolocation=(), payment=()'
-    );
-    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
-    res.setHeader('X-Download-Options', 'noopen');
-    next();
-  });
-} else {
-  console.log('⚠️  PENTEST MODE: Helmet security headers DISABLED');
-}
-
-// 2. CORS — strict origins normally; accept ALL origins in pentest mode
 if (PENTEST) {
-  app.use(cors({ origin: true, credentials: true }));
-  console.log('⚠️  PENTEST MODE: CORS accepting ALL origins');
-} else {
-  app.use(corsMiddleware);
+  console.log('⚠️  PENTEST MODE: all security middleware DISABLED');
 }
 
-// Handle CORS rejection gracefully
-app.use((err, req, res, next) => {
-  if (err && err.message === 'Not allowed by CORS') {
-    return res.status(403).json({ message: 'CORS: Origin not allowed' });
-  }
-  return next(err);
-});
+// 1. Security headers (Helmet). Internally disabled when PENTEST_MODE=true.
+app.use(securityHeaders);
+
+// 2. CORS — strict origins when protected; all origins in PENTEST_MODE.
+app.use(corsMiddleware);
 
 // 3. Cookie parser
 app.use(cookieParser());
 
-// 4. Body parsers with size limits
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+// 4. Body parsers. Request body is capped at 10KB when protections are active.
+const BODY_LIMIT = PENTEST ? '5mb' : '10kb';
+app.use(express.json({ limit: BODY_LIMIT }));
+app.use(express.urlencoded({ extended: false, limit: BODY_LIMIT }));
 
 // 4b. Passport (stateless — no sessions; used only for Google OAuth strategy)
 app.use(passport.initialize());
+
+// 4c. Request sanitization & validation — active only when PENTEST_MODE=false.
+//     Order matters: clean structure first, then reject malicious content.
+app.use(noSqlSanitize); // strip $/dotted keys (NoSQL injection)
+app.use(preventPrototypePollution); // strip __proto__/constructor/prototype
+app.use(sanitizeXss); // reject/strip HTML & <script>
+app.use(validateInputLength); // enforce field length limits
+app.use(validateEmail); // enforce email format when an email field is present
 
 // Serve uploaded files statically (no directory listing). Allow cross-origin
 // loading so the frontend (different port) can display avatars.
@@ -140,8 +106,17 @@ app.get('/health', (req, res) => {
 // 5. CSRF token endpoint (must be before verifyCsrfToken middleware)
 app.get('/api/auth/csrf-token', getCsrfToken);
 
+// Login brute-force limiter — MUST run before CSRF so that after the max
+// attempts it returns 429 regardless of whether a CSRF token is present.
+app.use('/api/auth/login', loginLimiter);
+
 // Verify CSRF on all state-changing /api requests
 app.use('/api', verifyCsrfToken);
+
+// 6. Mass assignment protection: strip role/isAdmin/etc. from registration so
+//    a client can never self-assign a privileged role. Must run before the
+//    auth router handles POST /api/auth/register.
+app.use('/api/auth/register', preventMassAssignment);
 
 // 7. Register routes (auth guards are applied inside each router)
 app.use('/api/auth', authRoutes);
@@ -154,27 +129,9 @@ app.use((req, res) => {
   res.status(404).json({ message: 'Resource not found' });
 });
 
-// 10. Global error handler - never leak stack traces in production
-// eslint-disable-next-line no-unused-vars
-app.use((err, req, res, next) => {
-  const isProduction = process.env.NODE_ENV === 'production';
-
-  // CSRF token errors from csurf-style middleware
-  if (err.code === 'EBADCSRFTOKEN') {
-    return res.status(403).json({ message: 'Invalid CSRF token' });
-  }
-
-  const status = err.status || err.statusCode || 500;
-
-  if (!isProduction) {
-    console.error(err);
-  }
-
-  res.status(status).json({
-    message: isProduction ? 'Something went wrong' : err.message,
-    ...(isProduction ? {} : { stack: err.stack }),
-  });
-});
+// 13. Global error handler — sanitizes errors (no stack traces leaked) and
+//     logs full details server-side. See middleware/security.js.
+app.use(errorHandler);
 
 // Create HTTP server so Socket.IO can share it
 const server = http.createServer(app);
@@ -182,12 +139,9 @@ const server = http.createServer(app);
 // 8. Socket.IO with CORS restriction
 const io = new Server(server, {
   cors: {
-    origin: [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://192.168.56.1:3000',
-      'http://192.168.56.1:3001',
-    ],
+    // Reuse the same allowlist as the HTTP CORS layer (extendable via
+    // CORS_ORIGIN in .env) so sockets connect from the LAN/VM IP too.
+    origin: ALLOWED_ORIGINS,
     methods: ['GET', 'POST'],
     credentials: true,
   },
