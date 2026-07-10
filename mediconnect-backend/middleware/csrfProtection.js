@@ -1,4 +1,5 @@
 const Tokens = require('csrf');
+const { isPentestMode } = require('../config/security');
 
 const tokens = new Tokens();
 
@@ -20,6 +21,11 @@ const getCsrfToken = (req, res) => {
 
 // Middleware: verify CSRF token on state-changing requests
 const verifyCsrfToken = (req, res, next) => {
+  // PENTEST_MODE: skip CSRF validation so requests work without a token
+  if (isPentestMode()) {
+    return next();
+  }
+
   // Safe methods do not require a CSRF token
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
     return next();
