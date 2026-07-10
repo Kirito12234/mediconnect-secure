@@ -6,7 +6,7 @@ const {
   COOKIE_MAX_AGE,
 } = require('../config/security');
 
-// Generate access token (7 day expiry)
+// Generate access token (15 day expiry, see JWT_EXPIRY)
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: JWT_EXPIRY });
 };
@@ -30,7 +30,7 @@ const setAccessTokenCookie = (res, token, maxAge = COOKIE_MAX_AGE) => {
     httpOnly: true, // Prevents JavaScript access (XSS protection)
     secure: isProduction, // HTTPS only in production
     sameSite: 'strict', // CSRF protection
-    maxAge: maxAge, // 7 days
+    maxAge: maxAge, // 15 days (COOKIE_MAX_AGE)
     path: '/',
   });
 };
