@@ -114,7 +114,9 @@ router.post('/register', registerLimiter, async (req, res) => {
 });
 
 // POST /api/auth/login
-router.post('/login', loginLimiter, async (req, res) => {
+// NOTE: loginLimiter is applied at the app level in server.js (before CSRF),
+// so it is intentionally NOT repeated here to avoid double-counting attempts.
+router.post('/login', async (req, res) => {
   const clientIp = req.ip;
   const userAgent = req.headers['user-agent'];
 
