@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const { COOKIE_NAME } = require('../config/security');
+const { COOKIE_NAME, isPentestMode } = require('../config/security');
 const { clearAccessTokenCookie } = require('../utils/tokenUtils');
 const { logAccessDenied } = require('../utils/auditLogger');
 
@@ -63,6 +63,11 @@ function authorize(...roles) {
   return (req, res, next) => {
     if (!req.user) {
       return res.status(401).json({ message: 'Not authenticated' });
+    }
+    // PENTEST_MODE: skip role verification so any authenticated user can reach
+    // role-restricted routes (e.g. admin). JWT auth (protect) still applies.
+    if (isPentestMode()) {
+      return next();
     }
     if (!roles.includes(req.user.role)) {
       logAccessDenied(
