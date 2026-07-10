@@ -92,9 +92,10 @@ const App: React.FC = () => (
           }
         />
 
-        {/* Default */}
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        {/* Default: open on the login page. Already-authenticated users are
+            forwarded to the dashboard by GuestRoute. */}
+        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
       <ToastContainer position="top-right" autoClose={4000} />
     </BrowserRouter>
