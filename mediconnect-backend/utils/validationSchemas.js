@@ -1,4 +1,5 @@
 const { z } = require('zod');
+const { isPentestMode } = require('../config/security');
 
 const registerSchema = z.object({
   name: z
@@ -23,6 +24,7 @@ const appointmentSchema = z.object({
   doctor: z.string().min(1, 'Doctor is required'),
   date: z.string().min(1, 'Date is required'),
   time: z.string().min(1, 'Time is required'),
+  type: z.string().optional(),
   notes: z.string().optional(),
 });
 
@@ -34,8 +36,11 @@ const changePasswordSchema = z.object({
 /**
  * Escape HTML-significant characters to neutralize stored XSS.
  * Non-string values are returned unchanged.
+ *
+ * PENTEST_MODE: returns the raw input unchanged so stored-XSS payloads survive.
  */
 const sanitizeInput = (input) => {
+  if (isPentestMode()) return input;
   if (typeof input !== 'string') return input;
   return input
     .replace(/&/g, '&amp;')
@@ -45,10 +50,23 @@ const sanitizeInput = (input) => {
     .replace(/'/g, '&#x27;');
 };
 
+/**
+ * Validate `data` against a Zod `schema`, mirroring `schema.safeParse`.
+ *
+ * PENTEST_MODE: bypasses validation entirely and passes the raw data through
+ * as `{ success: true, data }`, so injection/XSS/malformed payloads are
+ * accepted by every route that uses this helper.
+ */
+const validateOrBypass = (schema, data) => {
+  if (isPentestMode()) return { success: true, data };
+  return schema.safeParse(data);
+};
+
 module.exports = {
   registerSchema,
   loginSchema,
   appointmentSchema,
   changePasswordSchema,
   sanitizeInput,
+  validateOrBypass,
 };
