@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import { X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
+import GoogleLoginButton from '../components/auth/GoogleLoginButton';
 
 const TEAL = '#0d9488';
 
@@ -23,6 +24,15 @@ const LoginPage: React.FC = () => {
   const [useRecovery, setUseRecovery] = useState(false);
   const [mfaError, setMfaError] = useState('');
   const [verifying, setVerifying] = useState(false);
+
+  // Surface errors handed back by the Google OAuth callback redirect
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('error') === 'google_auth_failed') {
+      toast.error('Google sign-in failed. Please try again.');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -121,6 +131,8 @@ const LoginPage: React.FC = () => {
             {submitting ? 'Signing in...' : 'Sign in'}
           </button>
         </form>
+
+        <GoogleLoginButton label="Login with Google" />
 
         <p style={styles.footer}>
           No account?{' '}

@@ -4,6 +4,7 @@ import { toast } from 'react-toastify';
 import { User, Stethoscope, Check, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { validatePassword } from '../utils/passwordValidator';
+import GoogleLoginButton from '../components/auth/GoogleLoginButton';
 
 type Role = 'user' | 'doctor';
 
@@ -217,6 +218,8 @@ const RegisterPage: React.FC = () => {
             {submitting ? 'Creating account...' : 'Register'}
           </button>
         </form>
+
+        <GoogleLoginButton label="Sign up with Google" />
 
         <p style={styles.footer}>
           Already have an account?{' '}
