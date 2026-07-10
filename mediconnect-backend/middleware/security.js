@@ -10,6 +10,7 @@
  */
 const helmet = require('helmet');
 const cors = require('cors');
+const mongoSanitize = require('express-mongo-sanitize');
 const { isPentestMode } = require('../config/security');
 
 // ---------------------------------------------------------------------------
@@ -115,8 +116,88 @@ const securityHeaders = (req, res, next) => {
   });
 };
 
+// ---------------------------------------------------------------------------
+// 4. NoSQL injection prevention (express-mongo-sanitize)
+// ---------------------------------------------------------------------------
+// Removes any keys that start with `$` or contain `.` from body/query/params
+// before they ever reach a Mongo query.
+const configuredMongoSanitize = mongoSanitize();
+
+const noSqlSanitize = (req, res, next) => {
+  if (isPentestMode()) return next();
+  return configuredMongoSanitize(req, res, next);
+};
+
+// ---------------------------------------------------------------------------
+// 12. Prototype pollution prevention
+// ---------------------------------------------------------------------------
+const FORBIDDEN_KEYS = ['__proto__', 'constructor', 'prototype'];
+
+const deepClean = (value, depth = 0) => {
+  // Guard against pathological nesting.
+  if (depth > 20 || value === null || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => deepClean(item, depth + 1));
+    return;
+  }
+  for (const key of Object.keys(value)) {
+    if (FORBIDDEN_KEYS.includes(key)) {
+      delete value[key];
+      continue;
+    }
+    deepClean(value[key], depth + 1);
+  }
+};
+
+const preventPrototypePollution = (req, res, next) => {
+  if (isPentestMode()) return next();
+  ['body', 'query', 'params'].forEach((part) => {
+    if (req[part] && typeof req[part] === 'object') deepClean(req[part]);
+  });
+  next();
+};
+
+// ---------------------------------------------------------------------------
+// 13. Error message sanitization
+// ---------------------------------------------------------------------------
+// Never leak stack traces or internal details to clients when protections are
+// active. Detailed errors are always logged server-side.
+const errorHandler = (err, req, res, next) => {
+  // CSRF token errors surfaced by csurf-style middleware.
+  if (err && err.code === 'EBADCSRFTOKEN') {
+    return res.status(403).json({ message: 'Invalid CSRF token' });
+  }
+
+  // Body larger than the configured 10KB limit (9. input size validation).
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    if (!isPentestMode()) {
+      return res.status(400).json({ message: 'Input too long' });
+    }
+  }
+
+  const status = err.status || err.statusCode || 500;
+
+  // Always log the full error server-side for debugging.
+  // eslint-disable-next-line no-console
+  console.error('[error]', err);
+
+  if (isPentestMode()) {
+    // PENTEST_MODE: expose details to aid the assessment.
+    return res.status(status).json({ message: err.message, stack: err.stack });
+  }
+
+  // Protected: generic message for 5xx, safe message for client (4xx) errors.
+  if (status >= 500) {
+    return res.status(500).json({ message: 'Something went wrong' });
+  }
+  return res.status(status).json({ message: err.message || 'Request failed' });
+};
+
 module.exports = {
   ALLOWED_ORIGINS,
   corsMiddleware,
   securityHeaders,
+  noSqlSanitize,
+  preventPrototypePollution,
+  errorHandler,
 };
