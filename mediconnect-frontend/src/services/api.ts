@@ -1,6 +1,9 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 
-const API_BASE_URL = 'http://localhost:5001/api';
+// Use the current page's hostname so the app works whether opened via
+// localhost or a LAN/VM IP (e.g. 192.168.56.1). Falls back to localhost.
+const API_HOST = window.location.hostname || 'localhost';
+const API_BASE_URL = `http://${API_HOST}:5001/api`;
 
 const api = axios.create({
   baseURL: API_BASE_URL,

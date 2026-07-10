@@ -3,7 +3,7 @@ import { io, Socket } from 'socket.io-client';
 import { toast } from 'react-toastify';
 import { useAuth } from '../context/AuthContext';
 
-const SOCKET_URL = 'http://localhost:5001';
+const SOCKET_URL = `http://${window.location.hostname || 'localhost'}:5001`;
 
 export interface NotificationPayload {
   type?: string;
