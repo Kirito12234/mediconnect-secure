@@ -12,7 +12,18 @@ const userSchema = new mongoose.Schema(
     },
     phone: { type: String },
     avatar: { type: String },
-    password: { type: String, required: true, select: false },
+    // Google OAuth subject id. Sparse so multiple local-only accounts
+    // (which have no googleId) don't collide on the unique index.
+    googleId: { type: String, unique: true, sparse: true },
+    isEmailVerified: { type: Boolean, default: false },
+    // Password is only required for local (non-OAuth) accounts.
+    password: {
+      type: String,
+      required: function () {
+        return !this.googleId;
+      },
+      select: false,
+    },
     role: {
       type: String,
       enum: ['user', 'doctor', 'admin'],
