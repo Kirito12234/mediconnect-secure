@@ -31,7 +31,7 @@ const verifyCsrfToken = (req, res, next) => {
     return next();
   }
 
-  const secret = req.cookies._csrf_secret;
+  const secret = req.cookies?._csrf_secret;
   const token = req.headers['x-csrf-token'] || req.headers['x-xsrf-token'];
 
   if (!secret || !token || !tokens.verify(secret, token)) {
