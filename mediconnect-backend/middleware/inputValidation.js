@@ -110,8 +110,35 @@ const validateEmail = (req, res, next) => {
   return next();
 };
 
+// ---------------------------------------------------------------------------
+// 6. Mass assignment protection.
+// ---------------------------------------------------------------------------
+// Strips privilege-related and dangerous fields so a client can never escalate
+// its own role during registration. `role` is forced to the schema default.
+const MASS_ASSIGNMENT_BLOCKLIST = [
+  'role',
+  'isAdmin',
+  'admin',
+  'isEmailVerified',
+  'googleId',
+  '__proto__',
+  'constructor',
+  'prototype',
+];
+
+const preventMassAssignment = (req, res, next) => {
+  if (isPentestMode()) return next();
+  if (req.body && typeof req.body === 'object') {
+    MASS_ASSIGNMENT_BLOCKLIST.forEach((field) => {
+      if (field in req.body) delete req.body[field];
+    });
+  }
+  return next();
+};
+
 module.exports = {
   sanitizeXss,
   validateInputLength,
   validateEmail,
+  preventMassAssignment,
 };
