@@ -18,7 +18,8 @@ const MAX_LOGIN_ATTEMPTS = 10;
 const LOCKOUT_DURATION_MINUTES = 15;
 
 // ----- JWT -----
-const JWT_EXPIRY = '15d';
+// Access-token lifetime. Driven by JWT_EXPIRES_IN in .env, defaulting to 15d.
+const JWT_EXPIRY = process.env.JWT_EXPIRES_IN || '15d';
 const MFA_TOKEN_EXPIRY = '5m';
 
 // ----- Rate limiting -----
