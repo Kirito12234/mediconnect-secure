@@ -3,25 +3,21 @@ import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import { X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import api from '../services/api';
 import GoogleLoginButton from '../components/auth/GoogleLoginButton';
 
 const TEAL = '#0d9488';
 
 const LoginPage: React.FC = () => {
   const navigate = useNavigate();
-  const { login, setUser, checkAuth } = useAuth();
+  const { login, checkAuth } = useAuth();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  // MFA modal state
-  const [mfaOpen, setMfaOpen] = useState(false);
-  const [mfaToken, setMfaToken] = useState('');
+  // Inline OTP (2FA) state
+  const [otpRequired, setOtpRequired] = useState(false);
   const [code, setCode] = useState('');
-  const [recoveryCode, setRecoveryCode] = useState('');
-  const [useRecovery, setUseRecovery] = useState(false);
   const [mfaError, setMfaError] = useState('');
   const [verifying, setVerifying] = useState(false);
 
@@ -40,14 +36,14 @@ const LoginPage: React.FC = () => {
     try {
       const result = await login(email, password);
 
-      // 2. MFA required
-      if (result.mfaRequired && result.mfaToken) {
-        setMfaToken(result.mfaToken);
-        setMfaOpen(true);
+      // 2. Server requests a one-time code (2FA enabled)
+      if (result.requiresOTP) {
+        setOtpRequired(true);
+        toast.info('Enter the code from your authenticator app');
         return;
       }
 
-      // 4. Success without MFA
+      // 4. Success without 2FA
       if (result.user) {
         toast.success('Welcome back!');
         navigate('/dashboard');
@@ -83,21 +79,22 @@ const LoginPage: React.FC = () => {
     }
   };
 
-  const handleVerifyMfa = async (e: React.FormEvent) => {
+  // Re-submit the login with the OTP filled in.
+  const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setMfaError('');
     setVerifying(true);
     try {
-      const payload: Record<string, string> = { mfaToken };
-      if (useRecovery) payload.recoveryCode = recoveryCode;
-      else payload.code = code;
-
-      const { data } = await api.post('/auth/mfa/verify', payload);
-      setUser(data.user);
-      toast.success('Welcome back!');
-      navigate('/dashboard');
+      const result = await login(email, password, code.trim());
+      if (result.user) {
+        toast.success('Welcome back!');
+        navigate('/dashboard');
+      } else if (result.requiresOTP) {
+        setMfaError('OTP required. Please enter your 6-digit code.');
+      }
     } catch (err: any) {
-      setMfaError('Invalid verification code. Please try again.');
+      const message = err?.response?.data?.message;
+      setMfaError(message || 'Invalid verification code. Please try again.');
     } finally {
       setVerifying(false);
     }
@@ -142,8 +139,8 @@ const LoginPage: React.FC = () => {
         </p>
       </div>
 
-      {/* MFA verification modal */}
-      {mfaOpen && (
+      {/* Inline OTP (2FA) verification modal */}
+      {otpRequired && (
         <div style={styles.overlay}>
           <div style={styles.modal}>
             <div style={styles.modalHeader}>
@@ -152,7 +149,11 @@ const LoginPage: React.FC = () => {
               </h2>
               <button
                 type="button"
-                onClick={() => setMfaOpen(false)}
+                onClick={() => {
+                  setOtpRequired(false);
+                  setCode('');
+                  setMfaError('');
+                }}
                 style={styles.closeBtn}
                 aria-label="Close"
               >
@@ -160,44 +161,22 @@ const LoginPage: React.FC = () => {
               </button>
             </div>
 
-            <form onSubmit={handleVerifyMfa} style={styles.form}>
-              {useRecovery ? (
-                <input
-                  style={styles.input}
-                  placeholder="Recovery code"
-                  value={recoveryCode}
-                  onChange={(e) => setRecoveryCode(e.target.value)}
-                  required
-                />
-              ) : (
-                <input
-                  style={styles.input}
-                  placeholder="6-digit code"
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  inputMode="numeric"
-                  maxLength={6}
-                  required
-                />
-              )}
+            <form onSubmit={handleVerifyOtp} style={styles.form}>
+              <input
+                style={styles.input}
+                placeholder="6-digit code"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                inputMode="numeric"
+                maxLength={6}
+                autoFocus
+                required
+              />
 
               {mfaError && <small style={styles.error}>{mfaError}</small>}
 
               <button type="submit" style={styles.submit} disabled={verifying}>
-                {verifying ? 'Verifying...' : 'Verify'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setUseRecovery(!useRecovery);
-                  setMfaError('');
-                }}
-                style={styles.linkBtn}
-              >
-                {useRecovery
-                  ? 'Use authenticator code instead'
-                  : 'Use recovery code instead'}
+                {verifying ? 'Verifying...' : 'Verify & Sign in'}
               </button>
             </form>
           </div>
