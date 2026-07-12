@@ -245,17 +245,30 @@ router.post('/login', loginLimiter, async (req, res) => {
       });
     }
 
-    // MFA enabled -> require second factor.
-    // PENTEST_MODE: skip the OTP challenge entirely and issue a full session,
-    // so 2FA provides no protection at all (deliberate, for the assessment).
+    // MFA: inline OTP flow. PENTEST_MODE skips the OTP challenge entirely so
+    // 2FA provides no protection (deliberate, for the assessment).
     if (user.mfaEnabled && !pentestMode) {
-      const mfaToken = generateMfaToken(user._id);
-      return res.status(200).json({
-        mfaRequired: true,
-        mfaToken,
-        userId: user._id,
-        email: user.email,
+      const { otp } = req.body;
+
+      // No OTP supplied yet -> ask the client to collect one.
+      if (!otp) {
+        return res
+          .status(200)
+          .json({ requiresOTP: true, message: 'OTP required' });
+      }
+
+      // Verify the supplied 6-digit TOTP against the user's secret.
+      const otpValid = speakeasy.totp.verify({
+        secret: user.mfaSecret,
+        encoding: 'base32',
+        token: String(otp).trim(),
+        window: 1,
       });
+      if (!otpValid) {
+        await logLoginFailed(normalizedEmail, clientIp, userAgent, 'invalid_otp');
+        return res.status(401).json({ message: 'Invalid OTP code' });
+      }
+      // Valid OTP -> fall through and issue the session below.
     }
 
     // No MFA -> issue access token cookie
@@ -296,7 +309,9 @@ const completeGoogleLogin = async (req, res, user) => {
     req.headers['user-agent'],
     user.mfaEnabled
   );
-  return res.redirect(`${CLIENT_URL}/dashboard`);
+  // Land on the frontend OAuth callback route, which finalizes the session
+  // (cookie is already set) and forwards to the dashboard.
+  return res.redirect(`${CLIENT_URL}/auth/callback`);
 };
 
 // GET /api/auth/google — kick off the OAuth flow
@@ -375,7 +390,7 @@ router.post('/logout', (req, res) => {
 });
 
 // POST /api/auth/mfa/setup (authenticated)
-router.post('/mfa/setup', protect, async (req, res) => {
+router.post(['/mfa/setup', '/2fa/setup'], protect, async (req, res) => {
   try {
     // 1. Generate a TOTP secret bound to the user's email
     const secret = speakeasy.generateSecret({
@@ -411,7 +426,7 @@ const verifySetupSchema = z.object({
 });
 
 // POST /api/auth/mfa/verify-setup (authenticated)
-router.post('/mfa/verify-setup', protect, async (req, res) => {
+router.post(['/mfa/verify-setup', '/2fa/verify'], protect, async (req, res) => {
   try {
     const parsed = verifySetupSchema.safeParse(req.body);
     if (!parsed.success) {

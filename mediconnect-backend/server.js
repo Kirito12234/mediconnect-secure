@@ -110,9 +110,11 @@ app.use((err, req, res, next) => {
 // 3. Cookie parser
 app.use(cookieParser());
 
-// 4. Body parsers with size limits
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+// 4. Body parsers with size limits (10KB when protected; effectively no cap in
+//    PENTEST_MODE so large/malicious payloads are accepted).
+const BODY_LIMIT = PENTEST ? '5mb' : '10kb';
+app.use(express.json({ limit: BODY_LIMIT }));
+app.use(express.urlencoded({ extended: false, limit: BODY_LIMIT }));
 
 // 4b. Passport (stateless — no sessions; used only for Google OAuth strategy)
 app.use(passport.initialize());
