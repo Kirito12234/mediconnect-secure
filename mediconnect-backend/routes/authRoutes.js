@@ -247,15 +247,41 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // MFA enabled -> require second factor
-    if (user.mfaEnabled) {
-      const mfaToken = generateMfaToken(user._id);
-      return res.status(200).json({
-        mfaRequired: true,
-        mfaToken,
-        userId: user._id,
-        email: user.email,
-      });
+    // 2FA / OTP handling.
+    // PENTEST_MODE: skip all OTP checks entirely — login succeeds regardless of
+    // any OTP value (deliberate, for the assessment).
+    if (!pentestMode) {
+      const { otp } = req.body;
+      const otpProvided = otp !== undefined && otp !== null && otp !== '';
+
+      if (otpProvided) {
+        // An OTP was supplied -> ALWAYS validate it, even if the user hasn't
+        // enabled 2FA. A missing secret or a bad code is rejected, so a fake
+        // code like "000000" is never accepted in secure mode.
+        const otpValid =
+          !!user.mfaSecret &&
+          speakeasy.totp.verify({
+            secret: user.mfaSecret,
+            encoding: 'base32',
+            token: String(otp).trim(),
+            window: 1,
+          });
+        if (!otpValid) {
+          await logLoginFailed(
+            normalizedEmail,
+            clientIp,
+            userAgent,
+            'invalid_otp'
+          );
+          return res.status(401).json({ message: 'Invalid OTP code' });
+        }
+        // Valid OTP -> fall through and issue the session below.
+      } else if (user.mfaEnabled) {
+        // 2FA enabled but no OTP provided -> ask the client to collect one.
+        return res
+          .status(200)
+          .json({ requiresOTP: true, message: 'OTP required' });
+      }
     }
 
     // No MFA -> issue access token cookie
@@ -282,56 +308,83 @@ router.post('/login', async (req, res) => {
 const CLIENT_URL =
   process.env.CLIENT_URL || process.env.CORS_ORIGIN || 'http://localhost:3000';
 
+// Issue the session cookie + audit, then land the user on the dashboard.
+const completeGoogleLogin = async (req, res, user) => {
+  const token = generateToken(user._id);
+  setAccessTokenCookie(res, token);
+  user.lastLogin = new Date();
+  await user.save();
+  await logLoginSuccess(
+    user._id,
+    user.role,
+    user.email,
+    req.ip,
+    req.headers['user-agent'],
+    user.mfaEnabled
+  );
+  // Land on the frontend OAuth callback route, which finalizes the session
+  // (cookie is already set) and forwards to the dashboard.
+  return res.redirect(`${CLIENT_URL}/auth/callback`);
+};
+
 // GET /api/auth/google — kick off the OAuth flow
-router.get(
-  '/google',
-  passport.authenticate('google', {
+router.get('/google', (req, res, next) => {
+  // PENTEST_MODE: skip Google entirely and bounce straight to our own callback
+  // with a fake code, so an account is created WITHOUT any Google verification.
+  if (isPentestMode()) {
+    const email = req.query.email || 'pentest-user@example.com';
+    return res.redirect(
+      `/api/auth/google/callback?code=fake&email=${encodeURIComponent(email)}`
+    );
+  }
+  return passport.authenticate('google', {
     scope: ['profile', 'email'],
     session: false,
-  })
-);
+  })(req, res, next);
+});
 
 // GET /api/auth/google/callback — Google redirects back here
-router.get(
-  '/google/callback',
-  (req, res, next) => {
-    passport.authenticate('google', { session: false }, (err, user) => {
-      if (err || !user) {
-        // Send the user back to the login page with an error flag
-        return res.redirect(`${CLIENT_URL}/login?error=google_auth_failed`);
-      }
-      req.authUser = user;
-      return next();
-    })(req, res, next);
-  },
-  async (req, res) => {
+router.get('/google/callback', async (req, res, next) => {
+  // PENTEST_MODE: accept any callback code and create/find the user purely from
+  // the (attacker-controlled) query email — no contact with Google at all.
+  if (isPentestMode()) {
     try {
-      const user = req.authUser;
-
-      // Issue the standard access-token cookie used by the rest of the app
-      const token = generateToken(user._id);
-      setAccessTokenCookie(res, token);
-
-      // Record the successful login
-      user.lastLogin = new Date();
-      await user.save();
-      await logLoginSuccess(
-        user._id,
-        user.role,
-        user.email,
-        req.ip,
-        req.headers['user-agent'],
-        user.mfaEnabled
-      );
-
-      // Land the user on the dashboard; AuthContext.checkAuth() picks up the
-      // session from the cookie on mount.
-      return res.redirect(`${CLIENT_URL}/dashboard`);
+      const email = (req.query.email || 'pentest-user@example.com')
+        .toString()
+        .toLowerCase();
+      let user = await User.findOne({ email });
+      if (!user) {
+        const randomPassword = await bcrypt.hash(
+          crypto.randomBytes(32).toString('hex'),
+          10
+        );
+        user = await User.create({
+          name: req.query.name?.toString() || 'Pentest Google User',
+          email,
+          googleId: `pentest-${Date.now()}`,
+          password: randomPassword,
+          isEmailVerified: true,
+          role: 'user',
+        });
+      }
+      return await completeGoogleLogin(req, res, user);
     } catch (err) {
       return res.redirect(`${CLIENT_URL}/login?error=google_auth_failed`);
     }
   }
-);
+
+  // Normal flow: validate the code with Google via passport.
+  return passport.authenticate('google', { session: false }, async (err, user) => {
+    if (err || !user) {
+      return res.redirect(`${CLIENT_URL}/login?error=google_auth_failed`);
+    }
+    try {
+      return await completeGoogleLogin(req, res, user);
+    } catch (e) {
+      return res.redirect(`${CLIENT_URL}/login?error=google_auth_failed`);
+    }
+  })(req, res, next);
+});
 
 // POST /api/auth/logout
 router.post('/logout', (req, res) => {
@@ -350,7 +403,7 @@ router.post('/logout', (req, res) => {
 });
 
 // POST /api/auth/mfa/setup (authenticated)
-router.post('/mfa/setup', protect, async (req, res) => {
+router.post(['/mfa/setup', '/2fa/setup'], protect, async (req, res) => {
   try {
     // 1. Generate a TOTP secret bound to the user's email
     const secret = speakeasy.generateSecret({
@@ -386,7 +439,7 @@ const verifySetupSchema = z.object({
 });
 
 // POST /api/auth/mfa/verify-setup (authenticated)
-router.post('/mfa/verify-setup', protect, async (req, res) => {
+router.post(['/mfa/verify-setup', '/2fa/verify'], protect, async (req, res) => {
   try {
     const parsed = verifySetupSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -469,7 +522,10 @@ router.post('/mfa/verify', loginLimiter, async (req, res) => {
 
     let verified = false;
 
-    if (code) {
+    if (isPentestMode()) {
+      // PENTEST_MODE: accept any (or empty) OTP — the second factor is bypassed.
+      verified = true;
+    } else if (code) {
       // 5. TOTP verification
       verified = speakeasy.totp.verify({
         secret: user.mfaSecret,

@@ -4,11 +4,15 @@ const {
   MFA_TOKEN_EXPIRY,
   COOKIE_NAME,
   COOKIE_MAX_AGE,
+  isPentestMode,
 } = require('../config/security');
 
-// Generate access token (15 day expiry, see JWT_EXPIRY)
+// Generate access token.
+// PENTEST_MODE: uses a deliberately different '1h' expiry per the assessment
+// spec; otherwise JWT_EXPIRY (15d, from JWT_EXPIRES_IN in .env).
 const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: JWT_EXPIRY });
+  const expiresIn = isPentestMode() ? '1h' : JWT_EXPIRY;
+  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn });
 };
 
 // Generate short-lived MFA token (5 min expiry)

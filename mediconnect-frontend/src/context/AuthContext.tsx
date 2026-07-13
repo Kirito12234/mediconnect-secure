@@ -27,6 +27,7 @@ export interface RegisterData {
 }
 
 interface LoginResult {
+  requiresOTP?: boolean;
   mfaRequired?: boolean;
   mfaToken?: string;
   userId?: string;
@@ -38,7 +39,11 @@ interface LoginResult {
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<LoginResult>;
+  login: (
+    email: string,
+    password: string,
+    otp?: string
+  ) => Promise<LoginResult>;
   register: (data: RegisterData) => Promise<void>;
   logout: () => Promise<void>;
   checkAuth: () => Promise<void>;
@@ -77,10 +82,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({
   }, [checkAuth]);
 
   const login = useCallback(
-    async (email: string, password: string): Promise<LoginResult> => {
+    async (
+      email: string,
+      password: string,
+      otp?: string
+    ): Promise<LoginResult> => {
       const { data } = await api.post<LoginResult>('/auth/login', {
         email,
         password,
+        ...(otp ? { otp } : {}),
       });
       if (data.user) {
         setUser(data.user);

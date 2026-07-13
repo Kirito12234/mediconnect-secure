@@ -11,11 +11,13 @@ import SocketListener from './components/shared/SocketListener';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import MfaVerifyPage from './pages/MfaVerifyPage';
+import AuthCallback from './pages/AuthCallback';
 import ChangePasswordPage from './pages/ChangePasswordPage';
 import DashboardPage from './pages/DashboardPage';
 import ProfilePage from './pages/ProfilePage';
 import AppointmentsPage from './pages/AppointmentsPage';
 import SettingsPage from './pages/SettingsPage';
+import TwoFactorSetup from './pages/TwoFactorSetup';
 import AdminPage from './pages/AdminPage';
 
 const App: React.FC = () => (
@@ -41,6 +43,7 @@ const App: React.FC = () => (
           }
         />
         <Route path="/mfa-verify" element={<MfaVerifyPage />} />
+        <Route path="/auth/callback" element={<AuthCallback />} />
 
         {/* Protected */}
         <Route
@@ -72,6 +75,14 @@ const App: React.FC = () => (
           element={
             <ProtectedRoute>
               <SettingsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/2fa-setup"
+          element={
+            <ProtectedRoute>
+              <TwoFactorSetup />
             </ProtectedRoute>
           }
         />

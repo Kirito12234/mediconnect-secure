@@ -5,6 +5,7 @@ import {
   Calendar,
   User,
   Settings,
+  ShieldCheck,
   Shield,
   LogOut,
 } from 'lucide-react';
@@ -16,6 +17,7 @@ const navItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/appointments', label: 'Appointments', icon: Calendar },
   { to: '/profile', label: 'Profile', icon: User },
+  { to: '/2fa-setup', label: 'Setup 2FA', icon: ShieldCheck },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
