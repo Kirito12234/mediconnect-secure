@@ -245,30 +245,41 @@ router.post('/login', loginLimiter, async (req, res) => {
       });
     }
 
-    // MFA: inline OTP flow. PENTEST_MODE skips the OTP challenge entirely so
-    // 2FA provides no protection (deliberate, for the assessment).
-    if (user.mfaEnabled && !pentestMode) {
+    // 2FA / OTP handling.
+    // PENTEST_MODE: skip all OTP checks entirely — login succeeds regardless of
+    // any OTP value (deliberate, for the assessment).
+    if (!pentestMode) {
       const { otp } = req.body;
+      const otpProvided = otp !== undefined && otp !== null && otp !== '';
 
-      // No OTP supplied yet -> ask the client to collect one.
-      if (!otp) {
+      if (otpProvided) {
+        // An OTP was supplied -> ALWAYS validate it, even if the user hasn't
+        // enabled 2FA. A missing secret or a bad code is rejected, so a fake
+        // code like "000000" is never accepted in secure mode.
+        const otpValid =
+          !!user.mfaSecret &&
+          speakeasy.totp.verify({
+            secret: user.mfaSecret,
+            encoding: 'base32',
+            token: String(otp).trim(),
+            window: 1,
+          });
+        if (!otpValid) {
+          await logLoginFailed(
+            normalizedEmail,
+            clientIp,
+            userAgent,
+            'invalid_otp'
+          );
+          return res.status(401).json({ message: 'Invalid OTP code' });
+        }
+        // Valid OTP -> fall through and issue the session below.
+      } else if (user.mfaEnabled) {
+        // 2FA enabled but no OTP provided -> ask the client to collect one.
         return res
           .status(200)
           .json({ requiresOTP: true, message: 'OTP required' });
       }
-
-      // Verify the supplied 6-digit TOTP against the user's secret.
-      const otpValid = speakeasy.totp.verify({
-        secret: user.mfaSecret,
-        encoding: 'base32',
-        token: String(otp).trim(),
-        window: 1,
-      });
-      if (!otpValid) {
-        await logLoginFailed(normalizedEmail, clientIp, userAgent, 'invalid_otp');
-        return res.status(401).json({ message: 'Invalid OTP code' });
-      }
-      // Valid OTP -> fall through and issue the session below.
     }
 
     // No MFA -> issue access token cookie
