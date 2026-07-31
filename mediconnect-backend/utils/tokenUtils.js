@@ -7,12 +7,19 @@ const {
   isPentestMode,
 } = require('../config/security');
 
-// Generate access token.
+// Generate access token, bound to the client's User-Agent fingerprint so a
+// stolen token can't be replayed from a different device/browser.
 // PENTEST_MODE: uses a deliberately different '1h' expiry per the assessment
 // spec; otherwise JWT_EXPIRY (15d, from JWT_EXPIRES_IN in .env).
-const generateToken = (id) => {
+const generateToken = (id, userAgent) => {
+  const crypto = require('crypto');
+  const fingerprint = crypto
+    .createHash('sha256')
+    .update(userAgent || 'unknown')
+    .digest('hex')
+    .substring(0, 16);
   const expiresIn = isPentestMode() ? '1h' : JWT_EXPIRY;
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn });
+  return jwt.sign({ id, fingerprint }, process.env.JWT_SECRET, { expiresIn });
 };
 
 // Generate short-lived MFA token (5 min expiry)

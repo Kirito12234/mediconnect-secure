@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const TokenBlacklist = require('../models/TokenBlacklist');
 const { COOKIE_NAME, isPentestMode } = require('../config/security');
 const { clearAccessTokenCookie } = require('../utils/tokenUtils');
 const { logAccessDenied } = require('../utils/auditLogger');
@@ -35,6 +36,31 @@ const protect = async (req, res, next) => {
   if (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000)) {
     clearAccessTokenCookie(res);
     return res.status(401).json({ message: 'Session expired' });
+  }
+
+  // Reject revoked tokens (blacklisted on logout). Always active — no
+  // PENTEST_MODE bypass, so a logged-out/captured token can never be reused.
+  const blacklisted = await TokenBlacklist.findOne({ token });
+  if (blacklisted) {
+    clearAccessTokenCookie(res);
+    return res.status(401).json({ message: 'Token has been revoked' });
+  }
+
+  // Session binding: the token is bound to the original client's User-Agent
+  // fingerprint, so a stolen token can't be replayed from another device.
+  // Skipped in PENTEST_MODE so Before-PENTEST testing still works.
+  if (!isPentestMode()) {
+    const crypto = require('crypto');
+    const currentFingerprint = crypto
+      .createHash('sha256')
+      .update(req.headers['user-agent'] || 'unknown')
+      .digest('hex')
+      .substring(0, 16);
+    if (decoded.fingerprint && decoded.fingerprint !== currentFingerprint) {
+      return res
+        .status(401)
+        .json({ message: 'Session invalid: device mismatch' });
+    }
   }
 
   const user = await User.findById(decoded.id).select('-password');

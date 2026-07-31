@@ -9,6 +9,18 @@ const { respondError } = require('../utils/respondError');
 
 const router = express.Router();
 
+// Whitelist of fields safe to return to the profile owner. Internal fields
+// (_id, __v, failedLoginAttempts, lockUntil, passwordExpiresAt, passwordHistory,
+// isActive, createdAt, updatedAt, etc.) are intentionally excluded.
+const publicProfile = (user) => ({
+  name: user.name,
+  email: user.email,
+  phone: user.phone,
+  role: user.role,
+  mfaEnabled: user.mfaEnabled,
+  lastLogin: user.lastLogin,
+});
+
 // All user routes require authentication
 router.use(protect);
 
@@ -19,7 +31,7 @@ router.get('/profile', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
-    return res.status(200).json({ user });
+    return res.status(200).json({ user: publicProfile(user) });
   } catch (err) {
     return respondError(res, 500, 'Failed to load profile', err);
   }
@@ -56,7 +68,7 @@ router.put('/profile', async (req, res) => {
       runValidators: true,
     }).select('-password');
 
-    return res.status(200).json({ user });
+    return res.status(200).json({ user: publicProfile(user) });
   } catch (err) {
     return respondError(res, 500, 'Failed to update profile', err);
   }

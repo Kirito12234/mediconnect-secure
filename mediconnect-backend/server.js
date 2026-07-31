@@ -103,6 +103,18 @@ app.use(
   })
 );
 
+// Prevent browsers/proxies from caching sensitive API responses (profile,
+// appointments, audit logs, etc.) to disk.
+app.use('/api', (req, res, next) => {
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    Pragma: 'no-cache',
+    Expires: '0',
+    'Surrogate-Control': 'no-store',
+  });
+  next();
+});
+
 // 6. Apply general API rate limiter
 app.use('/api', apiLimiter);
 

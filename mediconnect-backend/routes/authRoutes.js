@@ -6,8 +6,10 @@ const qrcode = require('qrcode');
 const passport = require('passport');
 const { z } = require('zod');
 
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
+const TokenBlacklist = require('../models/TokenBlacklist');
 const { loginLimiter, registerLimiter } = require('../middleware/rateLimiter');
 const { protect, authorizeRoles } = require('../middleware/authMiddleware');
 const {
@@ -254,7 +256,7 @@ router.post('/login', validateSchema(zodLoginSchema), async (req, res) => {
     // Password expired -> issue a session so the user can reach the
     // protected change-password flow, but signal that a change is required.
     if (user.isPasswordExpired()) {
-      const expiredToken = generateToken(user._id);
+      const expiredToken = generateToken(user._id, req.headers['user-agent']);
       setAccessTokenCookie(res, expiredToken);
       return res.status(403).json({
         message: 'Your password has expired. Please change it to continue.',
@@ -344,7 +346,7 @@ router.post('/login', validateSchema(zodLoginSchema), async (req, res) => {
     }
 
     // No MFA -> issue access token cookie
-    const token = generateToken(user._id);
+    const token = generateToken(user._id, req.headers['user-agent']);
     setAccessTokenCookie(res, token);
 
     return res.status(200).json({
@@ -369,7 +371,7 @@ const CLIENT_URL =
 
 // Issue the session cookie + audit, then land the user on the dashboard.
 const completeGoogleLogin = async (req, res, user) => {
-  const token = generateToken(user._id);
+  const token = generateToken(user._id, req.headers['user-agent']);
   setAccessTokenCookie(res, token);
   user.lastLogin = new Date();
   await user.save();
@@ -446,7 +448,7 @@ router.get('/google/callback', async (req, res, next) => {
 });
 
 // POST /api/auth/logout
-router.post('/logout', (req, res) => {
+router.post('/logout', async (req, res) => {
   // Best-effort audit: identify the user from the cookie if present
   const token = req.cookies?.[COOKIE_NAME];
   if (token) {
@@ -455,6 +457,27 @@ router.post('/logout', (req, res) => {
       logLogout(decoded.id, '', req.ip);
     } catch {
       // invalid/expired token — nothing to log
+    }
+
+    // Revoke the token: add it to the blacklist so a captured copy can't be
+    // reused until it naturally expires (TTL index auto-cleans it).
+    try {
+      const decoded = jwt.decode(token);
+      if (decoded && decoded.exp) {
+        await TokenBlacklist.updateOne(
+          { token },
+          {
+            $setOnInsert: {
+              token,
+              userId: decoded.id,
+              expiresAt: new Date(decoded.exp * 1000),
+            },
+          },
+          { upsert: true }
+        );
+      }
+    } catch {
+      // decode/store failure — still clear the cookie below
     }
   }
   clearAccessTokenCookie(res);
@@ -616,7 +639,7 @@ router.post('/mfa/verify', loginLimiter, async (req, res) => {
     }
 
     // 7. Issue access token cookie and return user data
-    const token = generateToken(user._id);
+    const token = generateToken(user._id, req.headers['user-agent']);
     setAccessTokenCookie(res, token);
 
     await logLoginSuccess(
@@ -784,7 +807,7 @@ router.post('/change-password', protect, async (req, res) => {
     fileAudit.logPasswordChange(user._id);
 
     // 14. Rotate session token (invalidates old cookie value)
-    const token = generateToken(user._id);
+    const token = generateToken(user._id, req.headers['user-agent']);
     setAccessTokenCookie(res, token);
 
     // 15. Success
