@@ -104,6 +104,40 @@ router.put('/users/:id/unlock', async (req, res) => {
   }
 });
 
+// DELETE /api/admin/users/:id - remove a user (admin only)
+router.delete('/users/:id', async (req, res) => {
+  try {
+    // Prevent an admin from deleting their own account (avoids self-lockout).
+    if (req.params.id === req.user._id.toString()) {
+      return res
+        .status(400)
+        .json({ message: 'You cannot delete your own account' });
+    }
+
+    const user = await User.findById(req.params.id).select('-password');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    await User.findByIdAndDelete(req.params.id);
+
+    await AuditLog.create({
+      userId: req.user._id,
+      action: 'USER_DELETED',
+      email: user.email,
+      role: user.role,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+      details: `User ${user.email} deleted by admin ${req.user.email}`,
+      success: true,
+    });
+
+    return res.status(200).json({ message: 'User deleted' });
+  } catch (err) {
+    return respondError(res, 500, 'Failed to delete user', err);
+  }
+});
+
 // GET /api/admin/stats - aggregate dashboard counts
 router.get('/stats', async (req, res) => {
   try {

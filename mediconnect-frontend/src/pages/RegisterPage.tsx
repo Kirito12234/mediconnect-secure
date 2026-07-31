@@ -2,9 +2,12 @@ import React, { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import { User, Stethoscope, Check, X } from 'lucide-react';
+import ReCAPTCHA from 'react-google-recaptcha';
 import { useAuth } from '../context/AuthContext';
 import { validatePassword } from '../utils/passwordValidator';
 import GoogleLoginButton from '../components/auth/GoogleLoginButton';
+
+const RECAPTCHA_SITE_KEY = process.env.REACT_APP_RECAPTCHA_SITE_KEY || '';
 
 type Role = 'user' | 'doctor';
 
@@ -44,6 +47,7 @@ const RegisterPage: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const passwordErrors = useMemo(
@@ -63,14 +67,22 @@ const RegisterPage: React.FC = () => {
     password &&
     confirmPassword &&
     passwordErrors.length === 0 &&
-    password === confirmPassword;
+    password === confirmPassword &&
+    (!RECAPTCHA_SITE_KEY || !!captchaToken);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
     setSubmitting(true);
     try {
-      await register({ name, phone, email, password, role });
+      await register({
+        name,
+        phone,
+        email,
+        password,
+        role,
+        captchaToken: captchaToken || undefined,
+      });
       toast.success('Registration successful. Please log in.');
       navigate('/login');
     } catch (err: any) {
@@ -205,6 +217,16 @@ const RegisterPage: React.FC = () => {
             <small style={styles.matchOk}>
               <Check size={14} /> Passwords match
             </small>
+          )}
+
+          {RECAPTCHA_SITE_KEY && (
+            <div style={{ display: 'flex', justifyContent: 'center' }}>
+              <ReCAPTCHA
+                sitekey={RECAPTCHA_SITE_KEY}
+                onChange={(token) => setCaptchaToken(token)}
+                onExpired={() => setCaptchaToken(null)}
+              />
+            </div>
           )}
 
           <button

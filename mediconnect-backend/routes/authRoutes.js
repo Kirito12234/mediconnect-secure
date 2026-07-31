@@ -9,7 +9,13 @@ const { z } = require('zod');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const { loginLimiter, registerLimiter } = require('../middleware/rateLimiter');
-const { protect } = require('../middleware/authMiddleware');
+const { protect, authorizeRoles } = require('../middleware/authMiddleware');
+const {
+  registerSchema: zodRegisterSchema,
+  loginSchema: zodLoginSchema,
+  validateSchema,
+} = require('../middleware/zodValidator');
+const { verifyCaptcha } = require('../middleware/captcha');
 const { validatePassword, isPasswordReused } = require('../utils/passwordValidator');
 const {
   registerSchema,
@@ -34,6 +40,12 @@ const {
   logRegistration,
   logLogout,
 } = require('../utils/auditLogger');
+// Additional file-based audit logging (winston). Runs alongside the MongoDB
+// audit log above; does not replace it.
+const fileAudit = require('../utils/logger');
+const { sendOtpEmail } = require('../utils/emailService');
+const fs = require('fs');
+const path = require('path');
 const {
   PASSWORD_EXPIRY_DAYS,
   PASSWORD_HISTORY_COUNT,
@@ -47,7 +59,7 @@ const { respondError } = require('../utils/respondError');
 const router = express.Router();
 
 // POST /api/auth/register
-router.post('/register', registerLimiter, async (req, res) => {
+router.post('/register', registerLimiter, verifyCaptcha, validateSchema(zodRegisterSchema), async (req, res) => {
   try {
     // 1 & 2. Extract and validate input shape with Zod.
     // PENTEST_MODE: validation is bypassed, so the raw body flows through —
@@ -103,6 +115,7 @@ router.post('/register', registerLimiter, async (req, res) => {
 
     // 10. Audit the registration
     await logRegistration(user._id, user.email, req.ip);
+    fileAudit.logRegistration(user._id, user.email);
 
     // 11. No token issued; user must log in
     return res.status(201).json({
@@ -116,7 +129,7 @@ router.post('/register', registerLimiter, async (req, res) => {
 // POST /api/auth/login
 // NOTE: loginLimiter is applied at the app level in server.js (before CSRF),
 // so it is intentionally NOT repeated here to avoid double-counting attempts.
-router.post('/login', async (req, res) => {
+router.post('/login', validateSchema(zodLoginSchema), async (req, res) => {
   const clientIp = req.ip;
   const userAgent = req.headers['user-agent'];
 
@@ -140,7 +153,7 @@ router.post('/login', async (req, res) => {
 
     // 3. Find user including secret fields needed for auth
     const user = await User.findOne({ email: normalizedEmail }).select(
-      '+password +mfaSecret'
+      '+password +mfaSecret +emailOtp +emailOtpExpires'
     );
 
     // 4. Unknown email
@@ -208,6 +221,7 @@ router.post('/login', async (req, res) => {
           userAgent,
           user.failedLoginAttempts
         );
+        fileAudit.logAccountLocked(user._id, user.email);
       } else {
         await user.save();
       }
@@ -218,6 +232,7 @@ router.post('/login', async (req, res) => {
         userAgent,
         'invalid_password'
       );
+      fileAudit.logLoginFailed(normalizedEmail, 'Invalid password');
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
@@ -234,6 +249,7 @@ router.post('/login', async (req, res) => {
       userAgent,
       user.mfaEnabled
     );
+    fileAudit.logLoginSuccess(user._id, user.email);
 
     // Password expired -> issue a session so the user can reach the
     // protected change-password flow, but signal that a change is required.
@@ -282,6 +298,49 @@ router.post('/login', async (req, res) => {
           .status(200)
           .json({ requiresOTP: true, message: 'OTP required' });
       }
+    }
+
+    // Email OTP second factor (independent of TOTP). Skipped in PENTEST_MODE.
+    if (!pentestMode && user.emailOtpEnabled) {
+      const { emailOtp } = req.body;
+
+      if (!emailOtp) {
+        // No code yet -> generate a 6-digit code, store it hashed (5 min TTL),
+        // email it, and ask the client to submit it.
+        const code = crypto.randomInt(100000, 1000000).toString();
+        user.emailOtp = await bcrypt.hash(code, 10);
+        user.emailOtpExpires = new Date(Date.now() + 5 * 60 * 1000);
+        await user.save();
+        await sendOtpEmail(user.email, code);
+        return res.status(200).json({
+          emailOtpRequired: true,
+          message: 'A login code was sent to your email.',
+        });
+      }
+
+      // Code supplied -> verify hash + expiry.
+      const expired =
+        !user.emailOtpExpires || user.emailOtpExpires.getTime() < Date.now();
+      const codeMatches =
+        !!user.emailOtp &&
+        (await bcrypt.compare(String(emailOtp).trim(), user.emailOtp));
+
+      if (expired || !codeMatches) {
+        await logLoginFailed(
+          normalizedEmail,
+          clientIp,
+          userAgent,
+          'invalid_email_otp'
+        );
+        return res
+          .status(401)
+          .json({ message: 'Invalid or expired email code' });
+      }
+
+      // Consume the code so it cannot be reused.
+      user.emailOtp = null;
+      user.emailOtpExpires = null;
+      await user.save();
     }
 
     // No MFA -> issue access token cookie
@@ -722,6 +781,7 @@ router.post('/change-password', protect, async (req, res) => {
 
     // 13. Audit
     await logPasswordChanged(user._id, user.email, req.ip);
+    fileAudit.logPasswordChange(user._id);
 
     // 14. Rotate session token (invalidates old cookie value)
     const token = generateToken(user._id);
@@ -731,6 +791,63 @@ router.post('/change-password', protect, async (req, res) => {
     return res.status(200).json({ message: 'Password changed successfully' });
   } catch (err) {
     return respondError(res, 500, 'Failed to change password', err);
+  }
+});
+
+// POST /api/auth/email-otp/enable - turn on email-based OTP for the account
+router.post('/email-otp/enable', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    user.emailOtpEnabled = true;
+    await user.save();
+    return res.status(200).json({ message: 'Email OTP enabled' });
+  } catch (err) {
+    return respondError(res, 500, 'Failed to enable email OTP', err);
+  }
+});
+
+// POST /api/auth/email-otp/disable - turn off email-based OTP
+router.post('/email-otp/disable', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    user.emailOtpEnabled = false;
+    user.emailOtp = null;
+    user.emailOtpExpires = null;
+    await user.save();
+    return res.status(200).json({ message: 'Email OTP disabled' });
+  } catch (err) {
+    return respondError(res, 500, 'Failed to disable email OTP', err);
+  }
+});
+
+// GET /api/auth/audit-log - last 100 file-based audit entries (admin only)
+router.get('/audit-log', protect, authorizeRoles('admin'), (req, res) => {
+  try {
+    const logFile = path.join(__dirname, '../logs/audit.log');
+    if (!fs.existsSync(logFile)) {
+      return res.json([]);
+    }
+    const logs = fs
+      .readFileSync(logFile, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .slice(-100)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return { raw: line };
+        }
+      });
+    return res.json(logs);
+  } catch (err) {
+    return respondError(res, 500, 'Failed to read audit log', err);
   }
 });
 

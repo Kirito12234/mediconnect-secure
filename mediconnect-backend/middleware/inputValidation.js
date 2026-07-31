@@ -18,6 +18,14 @@ const PASSWORD_FIELDS = new Set([
   'confirmPassword',
 ]);
 
+// Opaque tokens that are legitimately long — exempt from length limits and
+// HTML checks (e.g. the reCAPTCHA response token, hundreds of chars).
+const TOKEN_FIELDS = new Set([
+  'captchaToken',
+  'g-recaptcha-response',
+  'mfaToken',
+]);
+
 // 9. Per-field maximum lengths. Anything not listed uses DEFAULT_MAX.
 const FIELD_MAX_LENGTH = {
   name: 50,
@@ -59,8 +67,8 @@ const sanitizeXss = (req, res, next) => {
   if (isPentestMode()) return next();
   try {
     walkStrings(req.body, (key, value) => {
-      // Never inspect/alter password fields.
-      if (PASSWORD_FIELDS.has(key)) return value;
+      // Never inspect/alter password fields or opaque tokens (e.g. captcha).
+      if (PASSWORD_FIELDS.has(key) || TOKEN_FIELDS.has(key)) return value;
       if (HTML_TAG_REGEX.test(value)) {
         const err = new Error('Invalid characters');
         err.status = 400;
@@ -85,7 +93,8 @@ const validateInputLength = (req, res, next) => {
   if (isPentestMode()) return next();
   let tooLong = false;
   walkStrings(req.body, (key, value) => {
-    if (PASSWORD_FIELDS.has(key)) return value; // password length handled by policy
+    // password length handled by policy; tokens are legitimately long
+    if (PASSWORD_FIELDS.has(key) || TOKEN_FIELDS.has(key)) return value;
     const max = FIELD_MAX_LENGTH[key] || DEFAULT_MAX;
     if (value.length > max) tooLong = true;
     return value;

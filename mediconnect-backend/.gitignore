@@ -1,3 +1,6 @@
 node_modules
 .env
 uploads/
+
+# Audit log files (contain PII); keep the folder via .gitkeep
+logs/*.log

@@ -12,7 +12,7 @@ const protect = async (req, res, next) => {
   const token = req.cookies?.[COOKIE_NAME];
 
   if (!token) {
-    await logAccessDenied(
+    await logAccessDenied( 
       null,
       null,
       req.ip,
@@ -87,4 +87,6 @@ function authorize(...roles) {
   };
 }
 
-module.exports = { protect, authorize };
+// `authorizeRoles` is an alias for `authorize` (same role-check middleware),
+// exported so both naming conventions work.
+module.exports = { protect, authorize, authorizeRoles: authorize };

@@ -24,6 +24,7 @@ export interface RegisterData {
   phone: string;
   password: string;
   role?: 'user' | 'doctor';
+  captchaToken?: string;
 }
 
 interface LoginResult {

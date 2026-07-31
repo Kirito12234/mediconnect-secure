@@ -32,6 +32,10 @@ const userSchema = new mongoose.Schema(
     mfaEnabled: { type: Boolean, default: false },
     mfaSecret: { type: String, select: false },
     recoveryCodes: { type: [String], select: false, default: [] },
+    // Email OTP (second factor via a one-time code emailed at login)
+    emailOtpEnabled: { type: Boolean, default: false },
+    emailOtp: { type: String, select: false }, // hashed code
+    emailOtpExpires: { type: Date, select: false },
     failedLoginAttempts: { type: Number, default: 0 },
     lockUntil: { type: Date },
     passwordHistory: { type: [String], select: false, default: [] },

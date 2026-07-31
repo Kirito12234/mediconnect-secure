@@ -5,6 +5,7 @@ const cookie = require('cookie');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const cookieParser = require('cookie-parser');
+const xss = require('xss-clean');
 const { Server } = require('socket.io');
 
 const connectDB = require('./config/db');
@@ -78,6 +79,13 @@ app.use(passport.initialize());
 // 4c. Request sanitization & validation — active only when PENTEST_MODE=false.
 //     Order matters: clean structure first, then reject malicious content.
 app.use(noSqlSanitize); // strip $/dotted keys (NoSQL injection)
+
+// Extra XSS layer via xss-clean (in addition to sanitizeXss below).
+if (!isPentestMode()) {
+  app.use(xss());
+  console.log('XSS Protection: ACTIVE');
+}
+
 app.use(preventPrototypePollution); // strip __proto__/constructor/prototype
 app.use(sanitizeXss); // reject/strip HTML & <script>
 app.use(validateInputLength); // enforce field length limits
@@ -220,6 +228,20 @@ const start = async () => {
     await connectDB();
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`MediConnect backend listening on port ${PORT}`);
+
+      if (isPentestMode()) {
+        console.warn('WARNING: PENTEST MODE ACTIVE');
+        console.warn('All extra security features DISABLED');
+        console.warn('DO NOT use in production!');
+      } else {
+        console.log('All 14 security features ACTIVE');
+        console.log(
+          'Baseline: JWT, Password Policy, Rate Limit, RBAC, Audit Log, Google OAuth'
+        );
+        console.log(
+          'Extra: TOTP, Email OTP, Helmet, NoSQL Sanitize, XSS, CSRF, Zod, IDOR'
+        );
+      }
     });
   } catch (err) {
     console.error('Failed to start server:', err.message);
